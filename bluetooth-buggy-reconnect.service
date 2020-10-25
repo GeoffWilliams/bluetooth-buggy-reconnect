@@ -1,0 +1,10 @@
+[Unit]
+Description=Bluetooth autoconnect service for buggy devices
+After=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bluetooth-buggy-reconnect
+
+[Install]
+WantedBy=default.target

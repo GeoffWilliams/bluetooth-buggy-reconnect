@@ -1,0 +1,239 @@
+#!/usr/bin/python3
+
+import getopt
+import os
+import signal
+import sys
+
+from gi.repository import Gio, GLib
+from time import time
+
+
+SCRIPT_NAME = os.path.basename(sys.argv[0])
+CONNECTION_TIMEOUT = 3
+
+
+def properties_changed_handler(
+    connection, sender_name, object_path,
+    interface_name, signal_name, parameters, *user_data
+):
+    def clean_timeout(device):
+        if device.get('timeout', None):
+            GLib.source_remove(device['timeout'])
+            del device['timeout']
+
+    def connect_device(device_path):
+        def print_device_error(device_path, e):
+            print(
+                f'error connecting to device {device_path}: '
+                f'[{e.domain}]: {e.message}',
+                file=sys.stderr
+            )
+
+        # Handle the async replies for a connection attempt
+        def reply_handler(source_object, res, *user_data):
+            device_path = source_object.get_object_path()
+            try:
+                source_object.call_finish(res)
+            except GLib.Error as e:
+                print_device_error(device_path, e)
+            else:
+                print(f'successfully connected to device {device_path}')
+
+        del devices[device_path]
+
+        try:
+            # Read the device's properties
+            obj = Gio.DBusProxy.new_sync(
+                bus,
+                Gio.DBusProxyFlags.NONE,
+                None,
+                'org.bluez',
+                device_path,
+                'org.freedesktop.DBus.Properties'
+            )
+            (props,) = obj.call_sync(
+                'GetAll',
+                GLib.Variant.new_tuple(
+                    GLib.Variant.new_string("org.bluez.Device1")
+                ),
+                Gio.DBusCallFlags.NONE,
+                GLib.MAXINT
+            ).unpack()
+
+            if props.get('Connected', False):
+                if verbose:
+                    print(f'device {device_path} is already connected')
+            elif not props.get('Trusted', False):
+                if verbose:
+                    print(f'device {device_path} is not trusted')
+            else:
+                print(f'connecting to device {device_path}')
+
+                # Attempt to connect to the device
+                obj.call(
+                    'org.bluez.Device1.Connect',
+                    None,
+                    Gio.DBusCallFlags.NONE,
+                    GLib.MAXINT,
+                    None,
+                    reply_handler
+                )
+        except GLib.error as e:
+            print_device_error(device_path, e)
+
+        return False
+
+    # We're only interested in adapters that have been powered on
+    (interface_name, changed_properties, invalidated_properties) = parameters
+
+    if (
+        interface_name == 'org.bluez.Device1'
+        and 'Connected' in changed_properties
+    ):
+        if verbose:
+            print(
+                f'device {object_path} changed Connected state: '
+                '{changed_properties.get("Connected")}'
+            )
+
+        if not devices.get(object_path, False):
+            devices[object_path] = {}
+
+        if not changed_properties['Connected']:
+            if time() - devices[object_path]['last_connect'] < CONNECTION_TIMEOUT:
+                clean_timeout(devices[object_path])
+                devices[object_path]['timeout'] = GLib.timeout_add_seconds(
+                    CONNECTION_TIMEOUT,
+                    connect_device,
+                    object_path
+                )
+            else:
+                del devices[object_path]
+        else:
+            clean_timeout(devices[object_path])
+            devices[object_path]['last_connect'] = time()
+
+
+def usage():
+    print('\n'.join([
+        f'Usage: {SCRIPT_NAME} [OPTIONS]...',
+        '',
+        'Automatically connect to trusted buggy bluetooth devices',
+        '',
+        'OPTIONS:',
+        '  -h, --help        Print this help message',
+        '  -v, --verbose     Show more detailed log messages',
+        '',
+    ]))
+    sys.exit(0)
+
+
+def main():
+    global verbose
+
+    # Parse command line arguments
+    try:
+        opts, cmds = getopt.getopt(
+            sys.argv[1:], 'hv', ['help', 'verbose']
+        )
+    except getopt.GetoptError as e:
+        print(f'{SCRIPT_NAME}:', e, file=sys.stderr)
+        print(
+            f"Try '{SCRIPT_NAME} --help' for more information",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
+    # Process options (e.g. -h, --verbose)
+    for o, v in opts:
+        if o in ('-h', '--help'):
+            usage()
+        elif o in ('-v', '--verbose'):
+            verbose = True
+        else:
+            # This shouldn't ever happen unless we forget to handle an
+            # option we've added
+            print(
+                f'{SCRIPT_NAME}: internal error: unhandled option {o}',
+                file=sys.stderr
+            )
+            sys.exit(1)
+
+    # Process commands
+    # This script does not use any commands so we will exit if one is
+    # incorrectly provided
+    if len(cmds) > 0:
+        print(
+            f"{SCRIPT_NAME}: command '{cmds[0]}' not recognized",
+            file=sys.stderr
+        )
+        print(
+            f"Try '{SCRIPT_NAME} --help' for more information",
+            file=sys.stderr
+        )
+        sys.exit(1)
+
+    # Set process name and title
+    # This allows commands like `killall SCRIPT_NAME` to function
+    # correctly
+    try:
+        import prctl
+        if verbose:
+            print(f'setting process name to \'{SCRIPT_NAME}\'')
+        prctl.set_name(SCRIPT_NAME)
+        prctl.set_proctitle(' '.join(sys.argv))
+    except ImportError:
+        if verbose:
+            print('failed to load module \'prctl\'')
+            print('process name not set')
+
+    # Listen for changes on the BlueZ dbus interface
+    # This is a catch all listener (no path specified) because we
+    # want to get notified for all adapters without keeping a list
+    # of them and managing signal handlers independantly
+    bus.signal_subscribe(
+        'org.bluez',
+        None,
+        'PropertiesChanged',
+        None,
+        None,
+        Gio.DBusSignalFlags.NONE,
+        properties_changed_handler
+    )
+
+    # Start the mainloop
+    loop.run()
+
+
+def signal_handler(sig, frame):
+    if sig in (signal.SIGINT, signal.SIGTERM):
+        # Gracefully exit
+        sys.exit(0)
+    else:
+        # This shouldn't ever happen unless we forget to handle a signal
+        # we've added
+        print(f'internal error: unhandled signal {sig}', file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == '__main__':
+    # Register signal handlers
+    signal.signal(signal.SIGHUP, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+    signal.signal(signal.SIGUSR2, signal.SIG_IGN)
+    signal.signal(signal.SIGALRM, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Connect to the system dbus
+    bus = Gio.bus_get_sync(Gio.BusType.SYSTEM)
+
+    # Initialize globals
+    verbose = False
+    devices = {}
+
+    # Initialize the mainloop, but don't start it yet
+    loop = GLib.MainLoop()
+
+    main()
