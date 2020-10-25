@@ -1,6 +1,6 @@
 # bluetooth-buggy-reconnect
 
-A linux command line tool to automatically reconnect buggy trusted bluetooth devices.
+A linux command line tool to automatically reconnect buggy trusted bluetooth devices.  
 This project was forked from bluetooth-autoconnect by Jonathan Rouleau.
 
 ## Requirements
@@ -30,5 +30,5 @@ OPTIONS:
 
 MIT License
 
-Copyright (c) 2019 Jonathan Rouleau
+Copyright (c) 2019 Jonathan Rouleau  
 Copyright (c) 2020 Yuri Konotopov
