@@ -101,7 +101,7 @@ def properties_changed_handler(
             devices[object_path] = {}
 
         if not changed_properties['Connected']:
-            if time() - devices[object_path]['last_connect'] < CONNECTION_TIMEOUT:
+            if time() - devices[object_path].get('last_connect', 0) < CONNECTION_TIMEOUT:
                 clean_timeout(devices[object_path])
                 devices[object_path]['timeout'] = GLib.timeout_add_seconds(
                     CONNECTION_TIMEOUT,
