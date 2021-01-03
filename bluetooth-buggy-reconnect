@@ -79,7 +79,7 @@ def properties_changed_handler(
                     None,
                     reply_handler
                 )
-        except GLib.error as e:
+        except GLib.Error as e:
             print_device_error(device_path, e)
 
         return False
