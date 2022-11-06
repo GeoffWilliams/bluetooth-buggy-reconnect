@@ -39,6 +39,78 @@ def dbus_get_child_object_paths(object_path):
 
     return object_paths
 
+def connect_device(device_path):
+    if verbose:
+        print(f'found device {device_path}')
+    try:
+        # Read the device's properties
+        obj = Gio.DBusProxy.new_sync(
+            bus,
+            Gio.DBusProxyFlags.NONE,
+            None,
+            'org.bluez',
+            device_path,
+            'org.freedesktop.DBus.Properties'
+        )
+        (props,) = obj.call_sync(
+            'GetAll',
+            GLib.Variant.new_tuple(GLib.Variant.new_string("org.bluez.Device1")),
+            Gio.DBusCallFlags.NONE,
+            GLib.MAXINT
+        ).unpack()
+
+        if props.get('Connected', False):
+            if verbose:
+                print(f'device {device_path} is already connected')
+        elif not props.get('Trusted', False):
+            if verbose:
+                print(f'device {device_path} is not trusted')
+        else:
+            print(f'connecting to device {device_path}')
+            add_pending_connection(device_path)
+
+            # Attempt to connect to the device
+            obj.call(
+                'org.bluez.Device1.Connect',
+                None,
+                Gio.DBusCallFlags.NONE,
+                GLib.MAXINT,
+                None,
+                reply_handler
+            )
+    except GLib.error as e:
+        print_device_error(device_path, e)
+
+
+# Manage pending connections for non-daemon mode
+def add_pending_connection(device_path):
+    if not daemon:
+        pending_connections.add(device_path)
+
+def remove_pending_connection(device_path):
+    if not daemon:
+        pending_connections.discard(device_path)
+        # If this was the last pending connection, terminate the
+        # mainloop
+        if len(pending_connections) == 0:
+            loop.quit()
+
+# Handle the async replies for a connection attempt
+def reply_handler(source_object, res, *user_data):
+    device_path = source_object.get_object_path()
+    try:
+        source_object.call_finish(res)
+    except GLib.Error as e:
+        print_device_error(device_path, e)
+    else:
+        print(f'successfully connected to device {device_path}')
+
+    remove_pending_connection(device_path)
+
+def print_device_error(device_path, e):
+    print(f'error connecting to device {device_path}: [{e.domain}]: {e.message}', file=sys.stderr)
+
+
 
 def connect_devices_for_adapter(adapter_path):
     if verbose:
@@ -47,75 +119,9 @@ def connect_devices_for_adapter(adapter_path):
     # Get list of devices
     device_paths = dbus_get_child_object_paths(adapter_path)
 
-    # Manage pending connections for non-daemon mode
-    def add_pending_connection(device_path):
-        if not daemon:
-            pending_connections.add(device_path)
-
-    def remove_pending_connection(device_path):
-        if not daemon:
-            pending_connections.discard(device_path)
-            # If this was the last pending connection, terminate the
-            # mainloop
-            if len(pending_connections) == 0:
-                loop.quit()
-
-    # Handle the async replies for a connection attempt
-    def reply_handler(source_object, res, *user_data):
-        device_path = source_object.get_object_path()
-        try:
-            source_object.call_finish(res)
-        except GLib.Error as e:
-            print_device_error(device_path, e)
-        else:
-            print(f'successfully connected to device {device_path}')
-
-        remove_pending_connection(device_path)
-
-    def print_device_error(device_path, e):
-        print(f'error connecting to device {device_path}: [{e.domain}]: {e.message}', file=sys.stderr)
-
     for device_path in device_paths:
-        if verbose:
-            print(f'found device {device_path}')
-        try:
-            # Read the device's properties
-            obj = Gio.DBusProxy.new_sync(
-                bus,
-                Gio.DBusProxyFlags.NONE,
-                None,
-                'org.bluez',
-                device_path,
-                'org.freedesktop.DBus.Properties'
-            )
-            (props,) = obj.call_sync(
-                'GetAll',
-                GLib.Variant.new_tuple(GLib.Variant.new_string("org.bluez.Device1")),
-                Gio.DBusCallFlags.NONE,
-                GLib.MAXINT
-            ).unpack()
+        connect_device(device_path)
 
-            if props.get('Connected', False):
-                if verbose:
-                    print(f'device {device_path} is already connected')
-            elif not props.get('Trusted', False):
-                if verbose:
-                    print(f'device {device_path} is not trusted')
-            else:
-                print(f'connecting to device {device_path}')
-                add_pending_connection(device_path)
-
-                # Attempt to connect to the device
-                obj.call(
-                    'org.bluez.Device1.Connect',
-                    None,
-                    Gio.DBusCallFlags.NONE,
-                    GLib.MAXINT,
-                    None,
-                    reply_handler
-                )
-        except GLib.error as e:
-            print_device_error(device_path, e)
 
 def connect_devices_for_all_adapters():
     if verbose:
@@ -164,6 +170,10 @@ def properties_changed_handler(connection, sender_name, object_path, interface_n
 
         # Try to connect to devices on this adapter
         connect_devices_for_adapter(object_path)
+    elif interface_name == 'org.bluez.Device1' and not changed_properties.get('Connected', False):
+        if verbose:
+            print(f'disconnected device {object_path} appeared')
+        connect_device(object_path)
 
 
 def usage():
